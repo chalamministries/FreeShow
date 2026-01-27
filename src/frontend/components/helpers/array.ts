@@ -156,6 +156,31 @@ export function sortFilenames<T extends Record<string, any>>(filenames: T[]) {
     })
 }
 
+// sort object by name and numbers any location (file names)
+export function sortFilenames(filenames) {
+    return filenames.sort(({ name: a }, { name: b }) => {
+        // extract name, number, and extension
+        const regex = /^(.*?)(?:_(\d+))?(\.\w+)?$/
+
+        // extract parts
+        const [_, nameA, numA, extA] = a.match(regex) || [a, a, null, null]
+        const [__, nameB, numB, extB] = b.match(regex) || [b, b, null, null]
+
+        // compare difference in the names
+        const nameComparison = nameA.localeCompare(nameB)
+        if (nameComparison !== 0) return nameComparison
+
+        // compare any numbers
+        const numComparison = (parseInt(numA) || 0) - (parseInt(numB) || 0)
+        if (numComparison !== 0) return numComparison
+
+        // compare extensions at last
+        const extAValue = extA || ""
+        const extBValue = extB || ""
+        return extAValue.localeCompare(extBValue)
+    })
+}
+
 // move keys to IDs in object and return array
 export function keysToID<T extends Record<string, any>>(object: T): (T[keyof T] & { id: string })[] {
     if (!object) return []
@@ -178,6 +203,24 @@ export function removeDuplicateValues<T>(obj: T): T {
     if (typeof obj !== "object") return obj
 
     const uniqueObj: T = {} as T
+    const valueSet = new Set()
+
+    for (const [key, value] of Object.entries(obj!)) {
+        const valueStr = JSON.stringify(value)
+        if (!valueSet.has(valueStr)) {
+            valueSet.add(valueStr)
+            uniqueObj[key] = value
+        }
+    }
+
+    return uniqueObj
+}
+
+// remove every duplicated values in object
+export function removeDuplicateValues<T>(obj: T): T {
+    if (typeof obj !== "object") return obj
+
+    let uniqueObj: T = {} as T
     const valueSet = new Set()
 
     for (const [key, value] of Object.entries(obj!)) {

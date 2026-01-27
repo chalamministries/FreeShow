@@ -1,292 +1,126 @@
+// import pcmconvert from "pcm-converter"
 import { toApp } from ".."
 import { NDI } from "../../types/Channels"
 import { OutputHelper } from "../output/OutputHelper"
 
-let warned = false
-const loadGrandiose = async () => {
-    try {
-        return await import("grandiose")
-    } catch (err) {
-        if (!warned) console.warn("NDI not available:", err.message)
-        warned = true
-        return null
-    }
-}
+// Resources:
+// https://www.npmjs.com/package/grandiose-mac
+// https://github.com/Streampunk/grandiose
+// https://github.com/rse/grandiose
+// https://github.com/rse/vingester
 
+// TODO: audio
 export class NdiReceiver {
-    static ndiDisabled = false
-    static NDI_RECEIVERS: { [key: string]: { frameRate: number; isReceiving?: boolean; shouldStop?: boolean; fetchInProgress?: boolean } } = {}
+    static ndiDisabled = false // isLinux && os.arch() !== "x64" && os.arch() !== "ia32"
+    timeStart = BigInt(Date.now()) * BigInt(1e6) - process.hrtime.bigint()
+    static receiverTimeout = -1 // 5000 // looks like this timeout exits the app even if the request is successful (if video() is called rapidly)
+    static NDI_RECEIVERS: any = {}
 
-    private static isCreatingReceiver = false
-    private static findSourcesInterval: NodeJS.Timeout | null = null
-    static allActiveReceivers: { [key: string]: any } = {}
-    static sendToOutputs: string[] = []
+    static async findStreamsNDI(): Promise<any> {
+        if (this.ndiDisabled) return
+        const grandiose = require("grandiose")
 
-    private static async createReceiver(source: { name: string; urlAddress: string }, lowbandwidth = false) {
-        while (this.isCreatingReceiver) await new Promise((resolve) => setTimeout(resolve, 50))
-        this.isCreatingReceiver = true
+        // grandiose.find() crashes the app without "{}"
+        const finder = await grandiose.find({ showLocalSources: true })
 
-        try {
-            const grandiose = await loadGrandiose()
-            if (!grandiose) return
-
-            const config: any = { source, colorFormat: grandiose.COLOR_FORMAT_RGBX_RGBA, allowVideoFields: false }
-            if (lowbandwidth) config.bandwidth = grandiose.BANDWIDTH_LOWEST
-
-            let timeout: NodeJS.Timeout | null = null
-            try {
-                const receiver = await Promise.race([
-                    grandiose.receive(config),
-                    new Promise((_, reject) => {
-                        timeout = setTimeout(() => reject(new Error("NDI receiver timeout")), 10000)
-                    })
-                ])
-                return receiver
-            } finally {
-                if (timeout) clearTimeout(timeout)
-            }
-        } finally {
-            this.isCreatingReceiver = false
-        }
-    }
-
-    static async findStreamsNDI(data: { groups?: string }): Promise<{ name: string; urlAddress: string }[]> {
-        if (this.ndiDisabled) return []
-        if (this.findSourcesInterval) clearInterval(this.findSourcesInterval)
-
-        const grandiose = await loadGrandiose()
-        if (!grandiose) return []
-
-        const finder: any = await grandiose.find({ showLocalSources: true, groups: data.groups || "" })
-        return new Promise<any[]>((resolve) => {
-            // without the interval it only finds one source: https://github.com/emanspeaks/grandiose/commit/271cd73b5269ab827155a1a944c15d3b5fe4d564
+        return new Promise((resolve) => {
+            // without the interval it only finds one source
+            // https://github.com/emanspeaks/grandiose/commit/271cd73b5269ab827155a1a944c15d3b5fe4d564
             let previousLength = 0
-            this.findSourcesInterval = setInterval(() => {
+            let findSourcesInterval = setInterval(() => {
                 const sources = finder.sources()
-                if (previousLength === sources.length) {
-                    clearInterval(this.findSourcesInterval!)
+                let currentLength = sources.length
+                if (previousLength === currentLength) {
+                    clearInterval(findSourcesInterval)
                     resolve(sources)
                 }
-                previousLength = sources.length
+                // finder.wait()
+                previousLength = currentLength
             }, 1000)
         })
     }
 
-    static async receiveStreamFrameNDI({ source }: { source: { name: string; urlAddress: string; id: string } }) {
+    static allActiveReceivers: any = {}
+    static async receiveStreamFrameNDI({ source }: any) {
         if (this.ndiDisabled) return
+        const grandiose = require("grandiose")
+
+        // https://github.com/Streampunk/grandiose/issues/12
+        if (!this.allActiveReceivers[source.id]) {
+            this.allActiveReceivers[source.id] = await grandiose.receive({ source: { name: source.name, urlAddress: source.urlAddress || source.id }, colorFormat: grandiose.COLOR_FORMAT_RGBX_RGBA })
+        }
+        // , allowVideoFields: false
 
         try {
-            if (!this.allActiveReceivers[source.id]) {
-                this.allActiveReceivers[source.id] = await this.createReceiver({ name: source.name, urlAddress: source.urlAddress || source.id }, true)
-            }
-
-            const receiver = this.allActiveReceivers[source.id]
-            if (!receiver?.video) {
-                delete this.allActiveReceivers[source.id]
-                return
-            }
-
-            // For NDI-HX sources, start continuous reception for thumbnail generation
-            if (!this.NDI_RECEIVERS[source.id]) {
-                this.NDI_RECEIVERS[source.id] = { frameRate: 0.1, isReceiving: true, shouldStop: false, fetchInProgress: false }
-                // Start lightweight frame loop for thumbnails only
-                this.thumbnailLoop(source.id, receiver, this.NDI_RECEIVERS[source.id])
-            }
-
-            let rawFrame: any = null
-            // If a fetch is already in progress for this source, skip this frame
-            const receiverData = this.NDI_RECEIVERS[source.id]
-            if (receiverData?.fetchInProgress) return
-
-            for (let attempt = 0; attempt < 3; attempt++) {
-                try {
-                    if (receiverData) receiverData.fetchInProgress = true
-                    rawFrame = await receiver.video(50)
-                    break
-                } catch (err: any) {
-                    const msg = err.message || ""
-                    if (msg.includes("Non-video data received")) {
-                        if (attempt < 2) continue
-                        return
-                    }
-                    if (msg.includes("source change") && attempt < 2) continue
-                    delete this.allActiveReceivers[source.id]
-                    return
-                } finally {
-                    if (receiverData) receiverData.fetchInProgress = false
-                }
-            }
-
-            if (rawFrame?.data?.length === rawFrame.xres * rawFrame.yres * 4) {
-                this.sendBuffer(source.id, rawFrame)
-            }
+            let videoFrame = await this.allActiveReceivers[source.id].video(this.receiverTimeout)
+            this.sendBuffer(source.id, videoFrame)
         } catch (err) {
             console.error(err)
         }
     }
 
-    private static handleError(err: any, consecutiveErrors: number): { shouldContinue: boolean; delay: number; newErrorCount: number } {
-        const msg = err.message || ""
-
-        if (msg.includes("Non-video data received")) return { shouldContinue: true, delay: 0, newErrorCount: Math.max(0, consecutiveErrors - 1) }
-        if (msg.includes("No video data received")) return { shouldContinue: true, delay: 1, newErrorCount: consecutiveErrors }
-
-        const newCount = consecutiveErrors + 1
-        return {
-            shouldContinue: newCount < 10,
-            delay: Math.min(5 * Math.pow(1.5, newCount), 100),
-            newErrorCount: newCount
-        }
-    }
-
-    private static updateAdaptiveDelay(processingTime: number, processingTimes: number[], currentDelay: number): { newTimes: number[]; newDelay: number } {
-        processingTimes.push(processingTime)
-        if (processingTimes.length > 10) processingTimes.shift()
-
-        let adaptiveDelay = currentDelay
-        if (processingTimes.length >= 5) {
-            const avgTime = processingTimes.reduce((a, b) => a + b) / processingTimes.length
-            if (avgTime < 5) adaptiveDelay = Math.max(8, adaptiveDelay - 1)
-            else if (avgTime > 15) adaptiveDelay = Math.min(50, adaptiveDelay + 2)
-        }
-
-        return { newTimes: processingTimes, newDelay: adaptiveDelay }
-    }
-
-    private static async frameLoop(sourceId: string, receiver: any, receiverData: any) {
-        let consecutiveErrors = 0
-        let processingTimes: number[] = []
-        let adaptiveDelay = 16
-
-        while (receiverData && !receiverData.shouldStop) {
-            const loopStart = Date.now()
-
-            try {
-                // Skip this iteration if another fetch is already in progress for this receiver
-                if (receiverData.fetchInProgress) {
-                    await new Promise((resolve) => setTimeout(resolve, 8))
-                    continue
-                }
-
-                receiverData.fetchInProgress = true
-                try {
-                    const rawFrame = await receiver.video(50)
-                    if (rawFrame) {
-                        this.sendBuffer(sourceId, rawFrame)
-                        consecutiveErrors = 0
-
-                        const processingTime = Date.now() - loopStart
-                        const result = this.updateAdaptiveDelay(processingTime, processingTimes, adaptiveDelay)
-                        processingTimes = result.newTimes
-                        adaptiveDelay = result.newDelay
-
-                        await new Promise((resolve) => setTimeout(resolve, adaptiveDelay))
-                        continue
-                    }
-                } finally {
-                    receiverData.fetchInProgress = false
-                }
-            } catch (err: any) {
-                const { shouldContinue, delay, newErrorCount } = this.handleError(err, consecutiveErrors)
-                consecutiveErrors = newErrorCount
-
-                if (!shouldContinue) {
-                    console.error(`NDI source ${sourceId}: Too many errors, stopping`)
-                    this.stopReceiversNDI({ id: sourceId })
-                    return
-                }
-
-                await new Promise((resolve) => setTimeout(resolve, delay))
-            }
-        }
-    }
-
-    private static async thumbnailLoop(sourceId: string, receiver: any, receiverData: any) {
-        let consecutiveErrors = 0
-
-        while (receiverData && !receiverData.shouldStop) {
-            try {
-                // If another fetch is in progress, wait a short while and skip
-                if (receiverData.fetchInProgress) {
-                    await new Promise((resolve) => setTimeout(resolve, 50))
-                    continue
-                }
-
-                receiverData.fetchInProgress = true
-                try {
-                    const rawFrame = await receiver.video(50)
-                    if (rawFrame) {
-                        this.sendBuffer(sourceId, rawFrame)
-                        consecutiveErrors = 0
-                        // Slower rate for thumbnails - every 500ms
-                        await new Promise((resolve) => setTimeout(resolve, 500))
-                        continue
-                    }
-                } finally {
-                    receiverData.fetchInProgress = false
-                }
-            } catch (err: any) {
-                const { shouldContinue, delay, newErrorCount } = this.handleError(err, consecutiveErrors)
-                consecutiveErrors = newErrorCount
-
-                if (!shouldContinue) {
-                    delete this.NDI_RECEIVERS[sourceId]
-                    return
-                }
-
-                await new Promise((resolve) => setTimeout(resolve, delay))
-            }
-        }
-    }
-
     static sendBuffer(id: string, frame: any) {
         if (!frame) return
-        const msg = { channel: "RECEIVE_STREAM", data: { id, frame, time: Date.now() } }
+
+        let msg = { channel: "RECEIVE_STREAM", data: { id, frame, time: Date.now() } }
         toApp(NDI, msg)
-        this.sendToOutputs.forEach((outputId) => OutputHelper.Send.sendToWindow(outputId, msg, NDI))
-    }
 
-    static async captureStreamNDI({ source, outputId }: { source: { name: string; urlAddress: string; id: string }; outputId: string }) {
-        if (this.ndiDisabled) return
-        if (!this.sendToOutputs.includes(outputId)) this.sendToOutputs.push(outputId)
-
-        let receiver = this.allActiveReceivers[source.id]
-        if (!receiver) {
-            receiver = this.allActiveReceivers[source.id] = await this.createReceiver({ name: source.name, urlAddress: source.urlAddress || source.id })
-        }
-
-        // If thumbnail loop is running, stop it and upgrade to full capture
-        if (this.NDI_RECEIVERS[source.id]) {
-            this.NDI_RECEIVERS[source.id].shouldStop = true
-            // Brief delay to let thumbnail loop exit cleanly
-            await new Promise((resolve) => setTimeout(resolve, 100))
-        }
-
-        // Start full capture loop
-        this.NDI_RECEIVERS[source.id] = { frameRate: 0.1, isReceiving: true, shouldStop: false }
-        const receiverData = this.NDI_RECEIVERS[source.id]
-
-        this.frameLoop(source.id, receiver, receiverData).catch((err) => {
-            console.error(`NDI reception error for ${source.id}:`, err)
-            this.stopReceiversNDI({ id: source.id })
+        this.sendToOutputs.forEach((outputId) => {
+            OutputHelper.Send.sendToWindow(outputId, msg, NDI)
         })
     }
 
-    static stopReceiversNDI(data: { id: string; outputId?: string } | null = null) {
+    static sendToOutputs: string[] = []
+    static async captureStreamNDI({ source, outputId }: any) {
+        if (this.ndiDisabled) return
+        const grandiose = require("grandiose")
+
+        if (!this.sendToOutputs.includes(outputId)) this.sendToOutputs.push(outputId)
+        if (this.NDI_RECEIVERS[source.id]) return
+        this.NDI_RECEIVERS[source.id] = { frameRate: 0.1 }
+
+        // this.NDI_RECEIVERS[source.id] = { frameRate: frameRate || 0.1 }
+        let receiver = this.allActiveReceivers[source.id]
+        if (!receiver) {
+            this.allActiveReceivers[source.id] = receiver = await grandiose.receive({ source: { name: source.name, urlAddress: source.urlAddress || source.id }, colorFormat: grandiose.COLOR_FORMAT_RGBX_RGBA })
+        }
+
+        let frameRate = (receiver.frameRateN || 30000) / (receiver.frameRateD || 1001)
+        this.NDI_RECEIVERS[source.id].frameRate = Math.round(1000 / frameRate)
+
+        let gettingFrame: boolean = false
+        this.NDI_RECEIVERS[source.id].interval = setInterval(async () => {
+            if (gettingFrame) return
+            gettingFrame = true
+
+            try {
+                // WIP app crashes if the ndi source stops sending data! (problem in grandiose package)
+                let videoFrame = await receiver.video(this.receiverTimeout)
+                this.sendBuffer(source.id, videoFrame)
+            } catch (err) {
+                console.error(err)
+                this.stopReceiversNDI({ id: source.id })
+            }
+
+            gettingFrame = false
+        }, this.NDI_RECEIVERS[source.id].frameRate)
+    }
+
+    static stopReceiversNDI(data: any = null) {
         if (data?.id) {
             if (data.outputId) this.sendToOutputs.splice(this.sendToOutputs.indexOf(data.outputId), 1)
-            else this.sendToOutputs = []
+            else this.sendToOutputs = [] // error
 
-            if (!this.sendToOutputs.length && this.NDI_RECEIVERS[data.id]) {
-                this.NDI_RECEIVERS[data.id].shouldStop = true
-                setTimeout(() => delete this.NDI_RECEIVERS[data.id], 100)
+            if (!this.sendToOutputs.length) {
+                clearInterval(this.NDI_RECEIVERS[data.id].interval)
+                delete this.NDI_RECEIVERS[data.id]
             }
             return
         }
 
-        Object.keys(this.NDI_RECEIVERS).forEach((id) => {
-            if (this.NDI_RECEIVERS[id]) this.NDI_RECEIVERS[id].shouldStop = true
+        Object.values(this.NDI_RECEIVERS).forEach(({ interval }: any) => {
+            clearInterval(interval)
         })
-        setTimeout(() => (this.NDI_RECEIVERS = {}), 100)
+        this.NDI_RECEIVERS = {}
     }
 }

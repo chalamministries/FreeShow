@@ -126,6 +126,7 @@
         "json-bible": "^1.1.3",
         "jzz": "^1.9.5",
         "libreoffice-convert": "^1.6.1",
+        "macadam": "github:hopejr/macadam#7232888",
         "mdb-reader": "^1.2.1",
         "mp4box": "^0.6.5",
         "music-metadata": "^7.14.0",

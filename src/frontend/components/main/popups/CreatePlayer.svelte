@@ -1,21 +1,21 @@
 <script lang="ts">
     import { uid } from "uid"
-    import { playerVideos, popupData } from "../../../stores"
-    import { clone } from "../../helpers/array"
-    import MaterialTextInput from "../../inputs/MaterialTextInput.svelte"
+    import { activePopup, playerVideos, popupData } from "../../../stores"
+    import { newToast } from "../../../utils/common"
+    import Icon from "../../helpers/Icon.svelte"
+    import T from "../../helpers/T.svelte"
+    import Button from "../../inputs/Button.svelte"
+    import CombinedInput from "../../inputs/CombinedInput.svelte"
+    import TextInput from "../../inputs/TextInput.svelte"
 
     let active: string | null = $popupData.active
-    let editId: string = $popupData.id || ""
     $: if (active) popupData.set({})
 
-    const currentId = editId || uid()
-    let data = clone($playerVideos[editId] || { name: "", id: "" })
-    $: if (data) update()
-
-    function update() {
-        if (!data.id?.length) {
-            // newToast("toast.no_video_id")
-            return
+    let data: any = { name: "", id: "" }
+    function add() {
+        if (!data.id.length) {
+            newToast("$toast.no_video_id")
+            return activePopup.set(null)
         }
 
         let id = data.id
@@ -35,13 +35,44 @@
         if (!name) name = id
 
         playerVideos.update((a) => {
-            a[currentId] = { id, name, type: active as any }
+            a[uid()] = { id, name, type: active as any }
             return a
         })
+
+        activePopup.set(null)
+    }
+
+    function setValue(e: any, key: string) {
+        data[key] = e.target.value
+    }
+
+    function keydown(e: any) {
+        if (e.key === "Enter") {
+            ;(document.activeElement as any).blur()
+            add()
+        }
     }
 </script>
 
-{#if !editId}
-    <MaterialTextInput label="inputs.name" value={data.name} on:change={(e) => (data.name = e.detail)} autofocus={!data.name} />
-{/if}
-<MaterialTextInput label="inputs.video_id" value={data.id || ""} placeholder="X-AJdKty74M" on:change={(e) => (data.id = e.detail)} />
+<div on:keydown={keydown}>
+    <CombinedInput textWidth={40}>
+        <p><T id="inputs.name" /></p>
+        <!-- placeholder={$dictionary.inputs?.name} -->
+        <TextInput value={data.name} on:input={(e) => setValue(e, "name")} on:paste={(e) => setValue(e, "name")} />
+    </CombinedInput>
+    <CombinedInput textWidth={40}>
+        <p><T id="inputs.video_id" /></p>
+        <!-- placeholder="X-AJdKty74M" -->
+        <!-- on:change did not trigger when pasting a value on mac -->
+        <TextInput value={data.id} on:input={(e) => setValue(e, "id")} on:paste={(e) => setValue(e, "id")} />
+    </CombinedInput>
+
+    <br />
+
+    <CombinedInput>
+        <Button style="width: 100%;" on:click={add} center dark>
+            <Icon id="add" size={1.2} right />
+            <T id="settings.add" />
+        </Button>
+    </CombinedInput>
+</div>

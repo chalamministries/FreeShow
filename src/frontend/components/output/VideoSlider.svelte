@@ -1,6 +1,5 @@
 <script lang="ts">
     import { OUTPUT } from "../../../types/Channels"
-    import { triggerClickOnEnterSpace } from "../../utils/clickable"
     import { send } from "../../utils/request"
     import { joinTime, secondsToTime } from "../helpers/time"
     import Slider from "../inputs/Slider.svelte"
@@ -8,11 +7,10 @@
     export let videoData: any
     export let videoTime: any
     export let activeOutputIds: string[] = []
-    export let unmutedId = ""
-    export let toOutput = false
-    export let big = false
-    export let disabled = false
-    export let changeValue = 0
+    export let unmutedId: string = ""
+    export let toOutput: boolean = false
+    export let disabled: boolean = false
+    export let changeValue: number = 0
 
     $: if (changeValue) updateValue()
     function updateValue() {
@@ -29,10 +27,10 @@
     let sliderValue = 0
 
     let hover = false
-    let time = "00:00"
+    let time: string = "00:00"
 
     function move(e: any) {
-        let padding = 3.5
+        let padding: number = 3.5
         let width: number = e.target.offsetWidth - padding * 2
         let offset: number = e.offsetX - padding
         let percentage: number = offset / width
@@ -43,8 +41,7 @@
         time = joinTime(secondsToTime((videoData.duration || 0) * percentage))
     }
 
-    // WIP duplicate of video.ts
-    let latestValue = "0"
+    let latestValue: string = "0"
     function sliderInput(e: any) {
         latestValue = e?.target?.value || e
         if ((!movePause && !videoData.paused) || !latestValue) return
@@ -83,8 +80,8 @@
 
     $: if (videoTime !== undefined && !movePause) sliderValue = videoTime
 
-    let movePause = false
-    function pauseAtMove(boolean = true) {
+    let movePause: boolean = false
+    function pauseAtMove(boolean: boolean = true) {
         movePause = videoData.paused = boolean
 
         if (!toOutput) return
@@ -97,7 +94,7 @@
         send(OUTPUT, ["DATA"], dataValues)
     }
 
-    let fullLength = false
+    let fullLength: boolean = false
 </script>
 
 <svelte:window
@@ -106,7 +103,7 @@
     }}
 />
 
-<div class="main" class:big>
+<div class="main">
     {#if hover}
         <span>
             {time}
@@ -132,7 +129,7 @@
             on:input={sliderInput}
         />
     </div>
-    <span style={fullLength ? "" : "color: var(--secondary)"} on:click={() => (fullLength = !fullLength)} on:keydown={triggerClickOnEnterSpace} role="button" tabindex="0" aria-label="Toggle time display format">
+    <span style={fullLength ? "" : "color: var(--secondary)"} on:click={() => (fullLength = !fullLength)}>
         {#if fullLength}
             {joinTime(secondsToTime(videoData.duration || 0))}
         {:else}
@@ -149,10 +146,6 @@
         margin: 0 5px;
         font-size: 0.8em;
     }
-    .main.big {
-        font-size: 1em;
-        margin: 0 10px;
-    }
 
     .slider {
         flex: 1;
@@ -160,8 +153,5 @@
         height: 100%;
         display: flex;
         align-items: center;
-    }
-    .main.big .slider {
-        margin: 0 10px;
     }
 </style>
